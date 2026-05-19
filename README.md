@@ -1,4 +1,4 @@
-##Camera pin connections:
+## Camera pin connections:
 
 * SCL -> P58
 

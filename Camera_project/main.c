@@ -25,6 +25,7 @@
 #include "uart.h"
 #include "spi.h"
 #include "gpio.h"
+#include "Adafruit_SSD1351.h"
 
 // Common interface includes
 #include "pinmux.h"
@@ -32,6 +33,7 @@
 #include "common.h"
 #include "uart_if.h"
 #include "i2c_if.h"
+
 
 // Custom includes
 #include "utils/network_utils.h"
@@ -73,14 +75,28 @@
 #define CAM_CS_BASE    GPIOA0_BASE
 #define CAM_CS_PIN     0x01    // PIN_50 -> GPIO0
 
-#define CAM_MOSI_BASE  GPIOA1_BASE
-#define CAM_MOSI_PIN   0x20    // PIN_45 -> GPIO13
+#define CAM_MOSI_BASE  GPIOA3_BASE
+#define CAM_MOSI_PIN   0x80    // PIN_45 -> GPIO31
 
 #define CAM_MISO_BASE  GPIOA3_BASE
 #define CAM_MISO_PIN   0x40    // PIN_53 -> GPIO30
 
 #define CAM_CLK_BASE   GPIOA0_BASE
 #define CAM_CLK_PIN    0x40    // PIN_61 -> GPIO6
+
+#define DC_GPIO_BASE   GPIOA2_BASE
+#define DC_PIN         0x40
+
+#define CS_GPIO_BASE   GPIOA1_BASE
+#define CS_PIN         0x10
+
+#define RST_GPIO_BASE  GPIOA1_BASE
+#define RST_PIN        0x20
+
+#define SCK_GPIO_BASE  GPIOA1_BASE
+#define SCK_PIN        0x40
+#define MOSI_GPIO_BASE GPIOA2_BASE
+#define MOSI_PIN       0x02
 
 //*****************************************************************************
 // Cooldown: minimum loop iterations between successive POSTs.
@@ -180,11 +196,7 @@ static unsigned char spi_transfer(unsigned char data)
                          (data & (1 << i)) ? CAM_MOSI_PIN : 0);
         MAP_UtilsDelay(5000);
 
-
         MAP_GPIOPinWrite(CAM_CLK_BASE, CAM_CLK_PIN, CAM_CLK_PIN);
-        MAP_UtilsDelay(5000);
-
-        MAP_GPIOPinWrite(CAM_CLK_BASE, CAM_CLK_PIN, 0);
         MAP_UtilsDelay(5000);
 
         rx <<= 1;
@@ -249,7 +261,6 @@ static unsigned char arducam_read_reg(unsigned char addr)
     return value;
 }
 
-
 //*****************************************************************************
 //
 //! main
@@ -264,28 +275,56 @@ void main(void)
     //-------------------------------------------------------------------------
     BoardInit();
     PinMuxConfig();
-    //SPIInit();
-
-
-    cam_deselect();
     InitTerm();
     ClearTerm();
+    cam_deselect();
     I2C_IF_Open(I2C_MASTER_MODE_FST);
 
-    arducam_write_reg(0x07, 0x80);   // ARDUCHIP_FIFO, reset
-    MAP_UtilsDelay(100000);
-    arducam_write_reg(0x07, 0x00);
-    MAP_UtilsDelay(100000);
+    Adafruit_Init();
+    FillScreen(0x0000);
+    UART_PRINT("Init done, filling screen...\n\r");
 
-    UART_PRINT("Testing ArduCAM SPI...\n\r");
+    //fillScreenRaw(0xFFFF);
 
-    arducam_write_reg(0x00, 0x56);
-    unsigned char test = arducam_read_reg(0x00);
-    UART_PRINT("Wrote 0x56, read back: 0x%02X\n\r", test);
+    FillScreen(0xF800);
 
-    arducam_write_reg(0x00, 0xAA);
-    test = arducam_read_reg(0x00);
-    UART_PRINT("Wrote 0xAA, read back: 0x%02X\n\r", test);
-
+    UART_PRINT("FillScreen done\n\r");
     while(1);
+
+
+//    arducam_write_reg(0x04, 0x80);   // ARDUCHIP_FIFO, reset
+//    MAP_UtilsDelay(100000);
+//    arducam_write_reg(0x04, 0x00);
+//    MAP_UtilsDelay(100000);
+
+//    arducam_write_reg(0x00, 0x56);
+//    unsigned char test = arducam_read_reg(0x00);
+//    UART_PRINT("Wrote 0x56, read back: 0x%02X\n\r", test);
+//
+//    arducam_write_reg(0x00, 0xAA);
+//    test = arducam_read_reg(0x00);
+//    UART_PRINT("Wrote 0xAA, read back: 0x%02X\n\r", test);
+
+//    UART_PRINT("--- Write 0xAA to reg 0x00 ---\n\r");
+//    cam_select();
+//    spi_transfer_debug(0x00 | 0x80, 0);   // address phase, quiet
+//    spi_transfer_debug(0xAA, 1);           // data phase, verbose MOSI
+//    cam_deselect();
+//    MAP_UtilsDelay(10000);
+//
+//    UART_PRINT("--- Read reg 0x00 ---\n\r");
+//    cam_select();
+//    spi_transfer_debug(0x00 & 0x7F, 0);   // address phase, quiet
+//    unsigned char val = spi_transfer_debug(0x00, 1);  // read phase, verbose MISO
+//    cam_deselect();
+//    UART_PRINT("Result: 0x%02X\n\r", val);
+//
+//    // Camera connected, CS deasserted (high)
+//    while(1)
+//    {
+//        UART_PRINT("MISO: 0x%02X\n\r", MAP_GPIOPinRead(CAM_MISO_BASE, CAM_MISO_PIN));
+//        MAP_UtilsDelay(2000000);
+//    }
+
+
 }

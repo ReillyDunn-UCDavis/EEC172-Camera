@@ -26,6 +26,19 @@
 #include "gpio.h"
 #include "prcm.h"
 
+
+#define CAM_CS_BASE    GPIOA0_BASE
+#define CAM_CS_PIN     0x01    // PIN_50 -> GPIO0
+
+#define CAM_MOSI_BASE  GPIOA1_BASE
+#define CAM_MOSI_PIN   0x20    // PIN_45 -> GPIO13
+
+#define CAM_MISO_BASE  GPIOA3_BASE
+#define CAM_MISO_PIN   0x40    // PIN_53 -> GPIO30
+
+#define CAM_CLK_BASE   GPIOA0_BASE
+#define CAM_CLK_PIN    0x40    // PIN_61 -> GPIO6
+
 void PinMuxConfig(void)
 {
     //-------------------------------------------------------------------------
@@ -67,4 +80,34 @@ void PinMuxConfig(void)
     //-------------------------------------------------------------------------
     MAP_PinTypeGPIO(PIN_64, PIN_MODE_0, false);
     MAP_GPIODirModeSet(GPIOA1_BASE, 0x2, GPIO_DIR_MODE_OUT);
+
+
+    //-------------------------------------------------------------------------
+    // ArduCam — bit-banged SPI via GPIO
+    //-------------------------------------------------------------------------
+    MAP_PinTypeGPIO(PIN_50, PIN_MODE_0, false);
+    MAP_PinTypeGPIO(PIN_45, PIN_MODE_0, false);
+    MAP_PinTypeGPIO(PIN_53, PIN_MODE_0, false);
+    MAP_PinTypeGPIO(PIN_61, PIN_MODE_0, false);
+
+    MAP_GPIODirModeSet(CAM_CLK_BASE,  CAM_CLK_PIN,  GPIO_DIR_MODE_OUT);
+    MAP_GPIODirModeSet(CAM_MOSI_BASE, CAM_MOSI_PIN, GPIO_DIR_MODE_OUT);
+    MAP_GPIODirModeSet(CAM_CS_BASE,   CAM_CS_PIN,   GPIO_DIR_MODE_OUT);
+    MAP_GPIODirModeSet(CAM_MISO_BASE, CAM_MISO_PIN, GPIO_DIR_MODE_IN);
+
+    MAP_GPIOPinWrite(CAM_CS_BASE, CAM_CS_PIN, CAM_CS_PIN);     // CS high
+    MAP_GPIOPinWrite(CAM_CLK_BASE, CAM_CLK_PIN, 0);            // CLK low
+    MAP_GPIOPinWrite(CAM_MOSI_BASE, CAM_MOSI_PIN, 0);
+
+    //    MAP_PinTypeSPI(PIN_59, PIN_MODE_7);
+//    MAP_PinTypeSPI(PIN_62, PIN_MODE_7);
+//    MAP_PinTypeSPI(PIN_53, PIN_MODE_7);
+//
+//    MAP_PinTypeGPIO(PIN_63, PIN_MODE_0, false);
+//
+//    MAP_GPIODirModeSet(GPIOA1_BASE,
+//                       0x20,
+//                       GPIO_DIR_MODE_OUT);
+//
+//    MAP_GPIODirModeSet(GPIOA0_BASE, 0x40, GPIO_DIR_MODE_IN);
 }

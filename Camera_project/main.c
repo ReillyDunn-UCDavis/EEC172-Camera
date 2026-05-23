@@ -64,11 +64,30 @@
 #define CLHEADER1  "Content-Length: "
 #define CLHEADER2  "\r\n\r\n"
 
-// Wall names embedded in the JSON payload — one per wall
-#define WALL_TOP    "top"
-#define WALL_BOTTOM "bottom"
-#define WALL_LEFT   "left"
-#define WALL_RIGHT  "right"
+#define ARDUCHIP_FIFO        0x04
+#define ARDUCHIP_TRIG        0x41
+#define FIFO_CLEAR_MASK      0x01
+#define FIFO_START_MASK      0x02
+#define CAP_DONE_MASK        0x08
+
+#define CAM_WIDTH   320
+#define CAM_HEIGHT  240
+#define OLED_WIDTH  128
+#define OLED_HEIGHT 96
+
+#define FIFO_SIZE1           0x42
+#define FIFO_SIZE2           0x43
+#define FIFO_SIZE3           0x44
+
+#define BURST_FIFO_READ      0x3C
+
+#define ARDUCHIP_MODE      0x02
+#define MCU2LCD_MODE       0x00
+#define CAM2LCD_MODE       0x01
+
+#define RED_SCALE    1.0f
+#define GREEN_SCALE  1.0f
+#define BLUE_SCALE   1.0f
 
 // Camera GPIO mapping
 
@@ -142,33 +161,6 @@ static void BoardInit(void)
     PRCMCC3200MCUInit();
 }
 
-//static void SPIInit()
-//{
-//    MAP_PRCMPeripheralClkEnable(PRCM_GSPI,
-//                                PRCM_RUN_MODE_CLK);
-//
-//    MAP_PRCMPeripheralReset(PRCM_GSPI);
-//
-//    MAP_SPIReset(GSPI_BASE);
-//
-//    MAP_SPIConfigSetExpClk(
-//        GSPI_BASE,
-//        MAP_PRCMPeripheralClockGet(PRCM_GSPI),
-//        1000000,
-//        SPI_MODE_MASTER,
-//        SPI_SUB_MODE_0,
-//        (SPI_SW_CTRL_CS |
-//         SPI_4PIN_MODE |
-//         SPI_TURBO_OFF |
-//         SPI_CS_ACTIVELOW |
-//         SPI_WL_8));
-//
-////    MAP_SPIFIFOEnable(GSPI_BASE, SPI_TX_FIFO | SPI_RX_FIFO);
-////    MAP_SPIFIFOLevelSet(GSPI_BASE, 1, 1);
-//
-//    MAP_SPIEnable(GSPI_BASE);
-//}
-
 static void cam_select(void)
 {
     MAP_GPIOPinWrite(CAM_CS_BASE,
@@ -194,17 +186,17 @@ static unsigned char spi_transfer(unsigned char data)
     for (i = 7; i >= 0; i--){
         MAP_GPIOPinWrite(CAM_MOSI_BASE, CAM_MOSI_PIN,
                          (data & (1 << i)) ? CAM_MOSI_PIN : 0);
-        MAP_UtilsDelay(5000);
+        //MAP_UtilsDelay(5000);
 
         MAP_GPIOPinWrite(CAM_CLK_BASE, CAM_CLK_PIN, CAM_CLK_PIN);
-        MAP_UtilsDelay(5000);
+        //MAP_UtilsDelay(5000);
 
         rx <<= 1;
         if (MAP_GPIOPinRead(CAM_MISO_BASE, CAM_MISO_PIN))
             rx |= 1;
 
         MAP_GPIOPinWrite(CAM_CLK_BASE, CAM_CLK_PIN, 0);
-        MAP_UtilsDelay(5000);
+        //MAP_UtilsDelay(5000);
     }
 
     return rx;
@@ -236,14 +228,11 @@ static int set_time(void)
 static void arducam_write_reg(unsigned char addr,
                               unsigned char data)
 {
-    UART_PRINT("Before Cam Select...\n\r");
     cam_select();
 
-    UART_PRINT("Before SPI Transfer...\n\r");
     spi_transfer(addr | 0x80);
     spi_transfer(data);
 
-    UART_PRINT("Before Cam Deselect...\n\r");
     cam_deselect();
 }
 
@@ -259,6 +248,226 @@ static unsigned char arducam_read_reg(unsigned char addr)
     cam_deselect();
 
     return value;
+}
+
+static void flush_fifo(){
+    arducam_write_reg(ARDUCHIP_FIFO, FIFO_CLEAR_MASK);
+}
+
+static void start_capture(){
+    arducam_write_reg(ARDUCHIP_FIFO, FIFO_START_MASK);
+}
+
+static int capture_done(){
+    return (arducam_read_reg(ARDUCHIP_TRIG) & CAP_DONE_MASK);
+}
+
+static unsigned long read_fifo_length(){
+    unsigned long len1, len2, len3;
+
+    len1 = arducam_read_reg(FIFO_SIZE1);
+    len2 = arducam_read_reg(FIFO_SIZE2);
+    len3 = arducam_read_reg(FIFO_SIZE3) & 0x7F;
+
+    return (len3 << 16) | (len2 << 8) | len1;
+}
+
+static unsigned char fifo_read_byte(){
+    return spi_transfer(0x00);
+}
+
+static void oled_begin_image(){
+    goTo(0, 0);
+
+    writeCommand(0x15);
+    writeData(0);
+    writeData(127);
+
+    writeCommand(0x75);
+    writeData(16);
+    writeData(127);
+
+    writeCommand(0x5C);
+}
+
+static void dump_fifo_bytes()
+{
+    int i;
+
+    cam_select();
+
+    spi_transfer(BURST_FIFO_READ);
+
+    UART_PRINT("FIFO bytes: ");
+
+    for(i = 0; i < 16; i++)
+    {
+        unsigned char b = fifo_read_byte();
+        UART_PRINT("%02X ", b);
+    }
+
+    UART_PRINT("\n\r");
+
+    cam_deselect();
+}
+
+void fill_screen_color(unsigned char hi, unsigned char lo)
+{
+    int i;
+    goTo(0, 0);
+    writeCommand(0x15); writeData(0); writeData(127);
+    writeCommand(0x75); writeData(0); writeData(127);
+    writeCommand(0x5C);
+    for (i = 0; i < 128*128; i++) {
+        writeData(hi);
+        writeData(lo);
+    }
+}
+
+static void display_camera_frame()
+{
+    unsigned long length;
+
+    UART_PRINT("Flushing FIFO...\n\r");
+
+    arducam_write_reg(ARDUCHIP_MODE, CAM2LCD_MODE);
+
+    flush_fifo();
+    start_capture();
+
+    while (!capture_done());
+
+    length = read_fifo_length();
+
+    UART_PRINT("FIFO length: %lu\n\r", length);
+
+    if (length == 0 || length > 200000)
+    {
+        UART_PRINT("Bad FIFO size\n\r");
+        return;
+    }
+
+    cam_select();
+    spi_transfer(BURST_FIFO_READ);
+
+    oled_begin_image();
+
+    int row, col;
+    for (row = 0; row < CAM_HEIGHT; row++)
+    {
+        int out_row = row * OLED_HEIGHT / CAM_HEIGHT;
+        int prev_out_row = (row > 0) ? (row-1) * OLED_HEIGHT / CAM_HEIGHT : -1;
+        int row_written = (out_row != prev_out_row);
+
+        for (col = 0; col < CAM_WIDTH; col++)
+        {
+            unsigned char hi = fifo_read_byte();
+            unsigned char lo = fifo_read_byte();
+
+            int out_col = col * OLED_WIDTH / CAM_WIDTH;
+            int prev_out_col = (col > 0) ? (col-1) * OLED_WIDTH / CAM_WIDTH : -1;
+
+            if (row_written && out_col != prev_out_col)
+            {
+                unsigned char red = (hi >> 3) & 0x1F;
+                unsigned char green = ((hi & 0x07) >> 3) | ((lo >> 5) & 0x07);
+                unsigned char blue = lo & 0x1F;
+
+                red = (unsigned char)(red * RED_SCALE > 31 ? 31 : red * RED_SCALE);
+                green = (unsigned char)(green * GREEN_SCALE > 63 ? 63 : green * GREEN_SCALE);
+                blue = (unsigned char)(blue * BLUE_SCALE  > 31 ? 31 : blue * BLUE_SCALE);
+
+                hi = (red << 3) | (green >> 3);
+                lo = (green << 5) | blue;
+
+                writeData(hi);
+                writeData(lo);
+            }
+        }
+    }
+
+    cam_deselect();
+
+    UART_PRINT("Frame displayed\n\r");
+}
+
+static int wrSensorReg8_8(unsigned char regID,
+                           unsigned char regDat)
+{
+    unsigned char data[2] = {regID, regDat};
+    int ret = I2C_IF_Write(0x30, data, 2, 1);
+    if (ret != 0)
+        UART_PRINT("I2C write failed: reg=0x%02X ret=%d\n\r", regID, ret);
+
+    return ret;
+}
+
+struct sensor_reg {
+    unsigned char reg;
+    unsigned char val;
+};
+
+static const struct sensor_reg ov2640_rgb565_regs[] =
+{
+    // select sensor bank
+    {0xff, 0x01},
+
+    // RGB mode
+    {0x12, 0x00},
+
+    // clock
+    {0x11, 0x01},
+
+    // output format RGB565
+    {0xff, 0x00},
+    {0xda, 0x08},
+
+    // disable JPEG
+    {0xe0, 0x00},
+
+    // QQVGA
+    {0xc0, 0x32},
+    {0xc1, 0x1e},
+    {0x8c, 0x00},
+
+    // scaling
+    {0x50, 0x89},
+
+    // DSP
+    {0x51, 0xc8},
+    {0x52, 0x96},
+    {0x53, 0x00},
+    {0x54, 0x00},
+    {0x55, 0x00},
+    {0x57, 0x00},
+
+    {0x00, 0x00}
+};
+
+static void ov2640_init_rgb565()
+{
+    int i = 0;
+
+    UART_PRINT("Initializing OV2640...\n\r");
+
+    wrSensorReg8_8(0xff, 0x01);
+    wrSensorReg8_8(0x12, 0x80);
+    MAP_UtilsDelay(8000000);
+
+    while (!(ov2640_rgb565_regs[i].reg == 0x00 &&
+             ov2640_rgb565_regs[i].val == 0x00))
+    {
+        wrSensorReg8_8(
+            ov2640_rgb565_regs[i].reg,
+            ov2640_rgb565_regs[i].val
+        );
+
+        MAP_UtilsDelay(10000);
+
+        i++;
+    }
+
+    UART_PRINT("OV2640 init done\n\r");
 }
 
 //*****************************************************************************
@@ -280,51 +489,23 @@ void main(void)
     cam_deselect();
     I2C_IF_Open(I2C_MASTER_MODE_FST);
 
+    ov2640_init_rgb565();
+
+    unsigned char da_val;
+    wrSensorReg8_8(0xff, 0x00);  // make sure we're in DSP bank
+    // read back 0xDA
+    unsigned char reg = 0xda;
+    I2C_IF_Write(0x30, &reg, 1, 0);
+    I2C_IF_Read(0x30, &da_val, 1);
+    UART_PRINT("0xDA = 0x%02X\n\r", da_val);
+
+    arducam_write_reg(ARDUCHIP_MODE, CAM2LCD_MODE);
+    unsigned char mode = arducam_read_reg(ARDUCHIP_MODE);
+
     Adafruit_Init();
-    FillScreen(0x0000);
-    UART_PRINT("Init done, filling screen...\n\r");
 
-    //fillScreenRaw(0xFFFF);
+    display_camera_frame();
 
-    FillScreen(0xF800);
-
-    UART_PRINT("FillScreen done\n\r");
     while(1);
-
-
-//    arducam_write_reg(0x04, 0x80);   // ARDUCHIP_FIFO, reset
-//    MAP_UtilsDelay(100000);
-//    arducam_write_reg(0x04, 0x00);
-//    MAP_UtilsDelay(100000);
-
-//    arducam_write_reg(0x00, 0x56);
-//    unsigned char test = arducam_read_reg(0x00);
-//    UART_PRINT("Wrote 0x56, read back: 0x%02X\n\r", test);
-//
-//    arducam_write_reg(0x00, 0xAA);
-//    test = arducam_read_reg(0x00);
-//    UART_PRINT("Wrote 0xAA, read back: 0x%02X\n\r", test);
-
-//    UART_PRINT("--- Write 0xAA to reg 0x00 ---\n\r");
-//    cam_select();
-//    spi_transfer_debug(0x00 | 0x80, 0);   // address phase, quiet
-//    spi_transfer_debug(0xAA, 1);           // data phase, verbose MOSI
-//    cam_deselect();
-//    MAP_UtilsDelay(10000);
-//
-//    UART_PRINT("--- Read reg 0x00 ---\n\r");
-//    cam_select();
-//    spi_transfer_debug(0x00 & 0x7F, 0);   // address phase, quiet
-//    unsigned char val = spi_transfer_debug(0x00, 1);  // read phase, verbose MISO
-//    cam_deselect();
-//    UART_PRINT("Result: 0x%02X\n\r", val);
-//
-//    // Camera connected, CS deasserted (high)
-//    while(1)
-//    {
-//        UART_PRINT("MISO: 0x%02X\n\r", MAP_GPIOPinRead(CAM_MISO_BASE, CAM_MISO_PIN));
-//        MAP_UtilsDelay(2000000);
-//    }
-
 
 }

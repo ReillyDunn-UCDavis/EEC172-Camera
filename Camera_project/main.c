@@ -23,6 +23,9 @@
 #include "prcm.h"
 #include "utils.h"
 #include "uart.h"
+#include "spi.h"
+#include "gpio.h"
+#include "Adafruit_SSD1351.h"
 
 // Common interface includes
 #include "pinmux.h"
@@ -30,6 +33,7 @@
 #include "common.h"
 #include "uart_if.h"
 #include "i2c_if.h"
+
 
 // Custom includes
 #include "utils/network_utils.h"
@@ -60,11 +64,58 @@
 #define CLHEADER1  "Content-Length: "
 #define CLHEADER2  "\r\n\r\n"
 
-// Wall names embedded in the JSON payload — one per wall
-#define WALL_TOP    "top"
-#define WALL_BOTTOM "bottom"
-#define WALL_LEFT   "left"
-#define WALL_RIGHT  "right"
+#define ARDUCHIP_FIFO        0x04
+#define ARDUCHIP_TRIG        0x41
+#define FIFO_CLEAR_MASK      0x01
+#define FIFO_START_MASK      0x02
+#define CAP_DONE_MASK        0x08
+
+#define CAM_WIDTH   320
+#define CAM_HEIGHT  240
+#define OLED_WIDTH  128
+#define OLED_HEIGHT 96
+
+#define FIFO_SIZE1           0x42
+#define FIFO_SIZE2           0x43
+#define FIFO_SIZE3           0x44
+
+#define BURST_FIFO_READ      0x3C
+
+#define ARDUCHIP_MODE      0x02
+#define MCU2LCD_MODE       0x00
+#define CAM2LCD_MODE       0x01
+
+#define RED_SCALE    1.0f
+#define GREEN_SCALE  1.0f
+#define BLUE_SCALE   1.0f
+
+// Camera GPIO mapping
+
+#define CAM_CS_BASE    GPIOA0_BASE
+#define CAM_CS_PIN     0x01    // PIN_50 -> GPIO0
+
+#define CAM_MOSI_BASE  GPIOA3_BASE
+#define CAM_MOSI_PIN   0x80    // PIN_45 -> GPIO31
+
+#define CAM_MISO_BASE  GPIOA3_BASE
+#define CAM_MISO_PIN   0x40    // PIN_53 -> GPIO30
+
+#define CAM_CLK_BASE   GPIOA0_BASE
+#define CAM_CLK_PIN    0x40    // PIN_61 -> GPIO6
+
+#define DC_GPIO_BASE   GPIOA2_BASE
+#define DC_PIN         0x40
+
+#define CS_GPIO_BASE   GPIOA1_BASE
+#define CS_PIN         0x10
+
+#define RST_GPIO_BASE  GPIOA1_BASE
+#define RST_PIN        0x20
+
+#define SCK_GPIO_BASE  GPIOA1_BASE
+#define SCK_PIN        0x40
+#define MOSI_GPIO_BASE GPIOA2_BASE
+#define MOSI_PIN       0x02
 
 //*****************************************************************************
 // Cooldown: minimum loop iterations between successive POSTs.
@@ -110,6 +161,46 @@ static void BoardInit(void)
     PRCMCC3200MCUInit();
 }
 
+static void cam_select(void)
+{
+    MAP_GPIOPinWrite(CAM_CS_BASE,
+                     CAM_CS_PIN,
+                     0);
+    //MAP_SPICSEnable(GSPI_BASE);
+    MAP_UtilsDelay(2000);
+}
+
+static void cam_deselect(void)
+{
+    MAP_UtilsDelay(2000);
+    //MAP_SPICSDisable(GSPI_BASE);
+    MAP_GPIOPinWrite(CAM_CS_BASE,
+                     CAM_CS_PIN,
+                     CAM_CS_PIN);
+}
+
+static unsigned char spi_transfer(unsigned char data)
+{
+    unsigned char rx = 0;
+    int i;
+    for (i = 7; i >= 0; i--){
+        MAP_GPIOPinWrite(CAM_MOSI_BASE, CAM_MOSI_PIN,
+                         (data & (1 << i)) ? CAM_MOSI_PIN : 0);
+        //MAP_UtilsDelay(5000);
+
+        MAP_GPIOPinWrite(CAM_CLK_BASE, CAM_CLK_PIN, CAM_CLK_PIN);
+        //MAP_UtilsDelay(5000);
+
+        rx <<= 1;
+        if (MAP_GPIOPinRead(CAM_MISO_BASE, CAM_MISO_PIN))
+            rx |= 1;
+
+        MAP_GPIOPinWrite(CAM_CLK_BASE, CAM_CLK_PIN, 0);
+        //MAP_UtilsDelay(5000);
+    }
+
+    return rx;
+}
 
 //*****************************************************************************
 //
@@ -134,87 +225,250 @@ static int set_time(void)
     return SUCCESS;
 }
 
-
-//*****************************************************************************
-//
-//! Send a POST to the AWS IoT device shadow reporting which wall was hit.
-//!
-//! \param wall   String identifying the wall: "top", "bottom", "left", "right"
-//!
-//! \return 0 on success, negative on failure
-//
-//*****************************************************************************
-static int notify_wall_hit(const char *wall)
+static void arducam_write_reg(unsigned char addr,
+                              unsigned char data)
 {
-    // Build the JSON body dynamically so we can embed the wall name
-    char body[256];
-    snprintf(body, sizeof(body),
-             "{\"state\":{\"desired\":{\"var\":\"Ball hit the %s wall!\"}}}\r\n\r\n",
-             wall);
+    cam_select();
 
-    // Open a fresh TLS connection for this POST
-    int sock = tls_connect();
-    if (sock < 0)
-    {
-        UART_PRINT("notify_wall_hit: TLS connect failed (%d)\n\r", sock);
-        return sock;
-    }
+    spi_transfer(addr | 0x80);
+    spi_transfer(data);
 
-    // Assemble the full HTTP request
-    char request[512];
-    char *p = request;
-
-    strcpy(p, POSTHEADER);  p += strlen(POSTHEADER);
-    strcpy(p, HOSTHEADER);  p += strlen(HOSTHEADER);
-    strcpy(p, CHEADER);     p += strlen(CHEADER);
-    strcpy(p, CTHEADER);    p += strlen(CTHEADER);
-    strcpy(p, CLHEADER1);   p += strlen(CLHEADER1);
-
-    char lenStr[16];
-    snprintf(lenStr, sizeof(lenStr), "%d", (int)strlen(body));
-    strcpy(p, lenStr);      p += strlen(lenStr);
-
-    strcpy(p, CLHEADER2);   p += strlen(CLHEADER2);
-    strcpy(p, body);
-
-    UART_PRINT("Sending wall-hit notification (%s)...\n\r", wall);
-
-    // Send
-    int ret = sl_Send(sock, request, strlen(request), 0);
-    if (ret < 0)
-    {
-        UART_PRINT("sl_Send failed: %d\n\r", ret);
-        sl_Close(sock);
-        return ret;
-    }
-
-    // Receive (and discard) the HTTP response
-    char recvBuf[1460];
-    ret = sl_Recv(sock, recvBuf, sizeof(recvBuf) - 1, 0);
-    if (ret > 0)
-    {
-        recvBuf[ret] = '\0';
-        UART_PRINT("Response: %s\n\r", recvBuf);
-    }
-
-    sl_Close(sock);
-    return 0;
+    cam_deselect();
 }
 
-
-//*****************************************************************************
-//
-//! Read a single signed byte from the BMA222 accelerometer via I2C
-//
-//*****************************************************************************
-static int readRegister(unsigned char reg)
+static unsigned char arducam_read_reg(unsigned char addr)
 {
-    unsigned char data = 0;
-    I2C_IF_Write(0x18, &reg, 1, 0);
-    I2C_IF_Read(0x18, &data, 1);
-    return (int)(signed char)data;
+    unsigned char value;
+
+    cam_select();
+
+    spi_transfer(addr & 0x7F);
+    value = spi_transfer(0x00);
+
+    cam_deselect();
+
+    return value;
 }
 
+static void flush_fifo(){
+    arducam_write_reg(ARDUCHIP_FIFO, FIFO_CLEAR_MASK);
+}
+
+static void start_capture(){
+    arducam_write_reg(ARDUCHIP_FIFO, FIFO_START_MASK);
+}
+
+static int capture_done(){
+    return (arducam_read_reg(ARDUCHIP_TRIG) & CAP_DONE_MASK);
+}
+
+static unsigned long read_fifo_length(){
+    unsigned long len1, len2, len3;
+
+    len1 = arducam_read_reg(FIFO_SIZE1);
+    len2 = arducam_read_reg(FIFO_SIZE2);
+    len3 = arducam_read_reg(FIFO_SIZE3) & 0x7F;
+
+    return (len3 << 16) | (len2 << 8) | len1;
+}
+
+static unsigned char fifo_read_byte(){
+    return spi_transfer(0x00);
+}
+
+static void oled_begin_image(){
+    goTo(0, 0);
+
+    writeCommand(0x15);
+    writeData(0);
+    writeData(127);
+
+    writeCommand(0x75);
+    writeData(16);
+    writeData(127);
+
+    writeCommand(0x5C);
+}
+
+static void dump_fifo_bytes()
+{
+    int i;
+
+    cam_select();
+
+    spi_transfer(BURST_FIFO_READ);
+
+    UART_PRINT("FIFO bytes: ");
+
+    for(i = 0; i < 16; i++)
+    {
+        unsigned char b = fifo_read_byte();
+        UART_PRINT("%02X ", b);
+    }
+
+    UART_PRINT("\n\r");
+
+    cam_deselect();
+}
+
+void fill_screen_color(unsigned char hi, unsigned char lo)
+{
+    int i;
+    goTo(0, 0);
+    writeCommand(0x15); writeData(0); writeData(127);
+    writeCommand(0x75); writeData(0); writeData(127);
+    writeCommand(0x5C);
+    for (i = 0; i < 128*128; i++) {
+        writeData(hi);
+        writeData(lo);
+    }
+}
+
+static void display_camera_frame()
+{
+    unsigned long length;
+
+    UART_PRINT("Flushing FIFO...\n\r");
+
+    arducam_write_reg(ARDUCHIP_MODE, CAM2LCD_MODE);
+
+    flush_fifo();
+    start_capture();
+
+    while (!capture_done());
+
+    length = read_fifo_length();
+
+    UART_PRINT("FIFO length: %lu\n\r", length);
+
+    if (length == 0 || length > 200000)
+    {
+        UART_PRINT("Bad FIFO size\n\r");
+        return;
+    }
+
+    cam_select();
+    spi_transfer(BURST_FIFO_READ);
+
+    oled_begin_image();
+
+    int row, col;
+    for (row = 0; row < CAM_HEIGHT; row++)
+    {
+        int out_row = row * OLED_HEIGHT / CAM_HEIGHT;
+        int prev_out_row = (row > 0) ? (row-1) * OLED_HEIGHT / CAM_HEIGHT : -1;
+        int row_written = (out_row != prev_out_row);
+
+        for (col = 0; col < CAM_WIDTH; col++)
+        {
+            unsigned char hi = fifo_read_byte();
+            unsigned char lo = fifo_read_byte();
+
+            int out_col = col * OLED_WIDTH / CAM_WIDTH;
+            int prev_out_col = (col > 0) ? (col-1) * OLED_WIDTH / CAM_WIDTH : -1;
+
+            if (row_written && out_col != prev_out_col)
+            {
+                unsigned char red = (hi >> 3) & 0x1F;
+                unsigned char green = ((hi & 0x07) >> 3) | ((lo >> 5) & 0x07);
+                unsigned char blue = lo & 0x1F;
+
+                red = (unsigned char)(red * RED_SCALE > 31 ? 31 : red * RED_SCALE);
+                green = (unsigned char)(green * GREEN_SCALE > 63 ? 63 : green * GREEN_SCALE);
+                blue = (unsigned char)(blue * BLUE_SCALE  > 31 ? 31 : blue * BLUE_SCALE);
+
+                hi = (red << 3) | (green >> 3);
+                lo = (green << 5) | blue;
+
+                writeData(hi);
+                writeData(lo);
+            }
+        }
+    }
+
+    cam_deselect();
+
+    UART_PRINT("Frame displayed\n\r");
+}
+
+static int wrSensorReg8_8(unsigned char regID,
+                           unsigned char regDat)
+{
+    unsigned char data[2] = {regID, regDat};
+    int ret = I2C_IF_Write(0x30, data, 2, 1);
+    if (ret != 0)
+        UART_PRINT("I2C write failed: reg=0x%02X ret=%d\n\r", regID, ret);
+
+    return ret;
+}
+
+struct sensor_reg {
+    unsigned char reg;
+    unsigned char val;
+};
+
+static const struct sensor_reg ov2640_rgb565_regs[] =
+{
+    // select sensor bank
+    {0xff, 0x01},
+
+    // RGB mode
+    {0x12, 0x00},
+
+    // clock
+    {0x11, 0x01},
+
+    // output format RGB565
+    {0xff, 0x00},
+    {0xda, 0x08},
+
+    // disable JPEG
+    {0xe0, 0x00},
+
+    // QQVGA
+    {0xc0, 0x32},
+    {0xc1, 0x1e},
+    {0x8c, 0x00},
+
+    // scaling
+    {0x50, 0x89},
+
+    // DSP
+    {0x51, 0xc8},
+    {0x52, 0x96},
+    {0x53, 0x00},
+    {0x54, 0x00},
+    {0x55, 0x00},
+    {0x57, 0x00},
+
+    {0x00, 0x00}
+};
+
+static void ov2640_init_rgb565()
+{
+    int i = 0;
+
+    UART_PRINT("Initializing OV2640...\n\r");
+
+    wrSensorReg8_8(0xff, 0x01);
+    wrSensorReg8_8(0x12, 0x80);
+    MAP_UtilsDelay(8000000);
+
+    while (!(ov2640_rgb565_regs[i].reg == 0x00 &&
+             ov2640_rgb565_regs[i].val == 0x00))
+    {
+        wrSensorReg8_8(
+            ov2640_rgb565_regs[i].reg,
+            ov2640_rgb565_regs[i].val
+        );
+
+        MAP_UtilsDelay(10000);
+
+        i++;
+    }
+
+    UART_PRINT("OV2640 init done\n\r");
+}
 
 //*****************************************************************************
 //
@@ -232,138 +486,26 @@ void main(void)
     PinMuxConfig();
     InitTerm();
     ClearTerm();
-    UART_PRINT("Ball game + AWS IoT wall notifier starting...\n\r");
-
+    cam_deselect();
     I2C_IF_Open(I2C_MASTER_MODE_FST);
 
-    // Configure the BMA222 accelerometer
-    unsigned char resetCmd[2] = {0x14, 0xB6};
-    I2C_IF_Write(0x18, resetCmd, 2, 1);
-    MAP_UtilsDelay(800000);
+    ov2640_init_rgb565();
 
-    unsigned char rangeCmd[2] = {0x0F, 0x03};   // ±2 g range
-    I2C_IF_Write(0x18, rangeCmd, 2, 1);
+    unsigned char da_val;
+    wrSensorReg8_8(0xff, 0x00);  // make sure we're in DSP bank
+    // read back 0xDA
+    unsigned char reg = 0xda;
+    I2C_IF_Write(0x30, &reg, 1, 0);
+    I2C_IF_Read(0x30, &da_val, 1);
+    UART_PRINT("0xDA = 0x%02X\n\r", da_val);
 
-    unsigned char bwCmd[2] = {0x10, 0x0C};       // 31.25 Hz bandwidth
-    I2C_IF_Write(0x18, bwCmd, 2, 1);
+    arducam_write_reg(ARDUCHIP_MODE, CAM2LCD_MODE);
+    unsigned char mode = arducam_read_reg(ARDUCHIP_MODE);
 
-    // Display init
     Adafruit_Init();
-    FillScreen(0x0000);
 
-    //-------------------------------------------------------------------------
-    // Network init
-    //-------------------------------------------------------------------------
-    g_app_config.host = SERVER_NAME;
-    g_app_config.port = GOOGLE_DST_PORT;
+    display_camera_frame();
 
-    lRetVal = connectToAccessPoint();
-    if (lRetVal < 0)
-    {
-        UART_PRINT("Failed to connect to AP\n\r");
-        LOOP_FOREVER();
-    }
+    while(1);
 
-    lRetVal = set_time();
-    if (lRetVal < 0)
-    {
-        UART_PRINT("Unable to set time\n\r");
-        LOOP_FOREVER();
-    }
-
-    UART_PRINT("Network ready. Starting game loop.\n\r");
-
-    //-------------------------------------------------------------------------
-    // Game state
-    //-------------------------------------------------------------------------
-    int x = 64, y = 64;
-    int prev_x = 64, prev_y = 64;
-    float vx = 0.0f, vy = 0.0f;
-
-    // Cooldown counter — starts at 0 so the first collision is reported
-    int post_cooldown = 0;
-
-    //-------------------------------------------------------------------------
-    // Game loop
-    //-------------------------------------------------------------------------
-    while (1)
-    {
-        //--- Read accelerometer ---
-        int yRaw = readRegister(0x03);
-        int xRaw = readRegister(0x05);
-
-        float raw_to_accel = 32.0f;
-        float ax = -(xRaw / raw_to_accel);
-        float ay = -(yRaw / raw_to_accel);
-
-        //--- Physics ---
-        vx += ax;
-        vy += ay;
-
-        float friction = 0.9f;
-        vx *= friction;
-        vy *= friction;
-
-        x += (int)vx;
-        y += (int)vy;
-
-        //--- Cooldown tick ---
-        if (post_cooldown > 0)
-            post_cooldown--;
-
-        //--- Wall collisions ---
-        // Each block: clamp position, reverse (& boost) velocity, then POST
-        // if the cooldown has expired.
-
-        if (x < 0)
-        {
-            x = 0;
-            vx = -vx * 1.1f;
-            if (post_cooldown == 0)
-            {
-                notify_wall_hit(WALL_LEFT);
-                post_cooldown = POST_COOLDOWN_TICKS;
-            }
-        }
-        else if (x > SCREEN_MAX_X)
-        {
-            x = SCREEN_MAX_X;
-            vx = -vx * 1.1f;
-            if (post_cooldown == 0)
-            {
-                notify_wall_hit(WALL_RIGHT);
-                post_cooldown = POST_COOLDOWN_TICKS;
-            }
-        }
-
-        if (y < 0)
-        {
-            y = 0;
-            vy = -vy * 1.1f;
-            if (post_cooldown == 0)
-            {
-                notify_wall_hit(WALL_TOP);
-                post_cooldown = POST_COOLDOWN_TICKS;
-            }
-        }
-        else if (y > SCREEN_MAX_Y)
-        {
-            y = SCREEN_MAX_Y;
-            vy = -vy * 1.1f;
-            if (post_cooldown == 0)
-            {
-                notify_wall_hit(WALL_BOTTOM);
-                post_cooldown = POST_COOLDOWN_TICKS;
-            }
-        }
-
-        //--- Draw ---
-        drawBall(prev_x, prev_y, BALL_RADIUS, BALL_RADIUS, 0x0000); // erase
-        drawBall(x,      y,      BALL_RADIUS, BALL_RADIUS, 0xFFFF); // draw
-
-        prev_x = x;
-        prev_y = y;
-
-        MAP_UtilsDelay(40000);
-    }
 }

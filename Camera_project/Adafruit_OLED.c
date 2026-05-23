@@ -41,9 +41,9 @@
 #define RST_PIN        0x20
 
 #define SCK_GPIO_BASE  GPIOA1_BASE
-#define SCK_PIN        0x40        // PIN_05 → GPIO14
+#define SCK_PIN        0x40
 #define MOSI_GPIO_BASE GPIOA2_BASE
-#define MOSI_PIN       0x02        // PIN_08 → GPIO17
+#define MOSI_PIN       0x02
 
 static void spi_send(uint8_t byte) {
     int i;
@@ -52,27 +52,30 @@ static void spi_send(uint8_t byte) {
             GPIOPinWrite(MOSI_GPIO_BASE, MOSI_PIN, MOSI_PIN);
         else
             GPIOPinWrite(MOSI_GPIO_BASE, MOSI_PIN, 0);
+        //MAP_UtilsDelay(100);
         GPIOPinWrite(SCK_GPIO_BASE, SCK_PIN, SCK_PIN);  // clock high
+        //MAP_UtilsDelay(100);
         GPIOPinWrite(SCK_GPIO_BASE, SCK_PIN, 0);         // clock low
+        //MAP_UtilsDelay(100);
     }
 }
 
 //*****************************************************************************
 
 void writeCommand(uint8_t cmd) {
-    GPIOPinWrite(DC_GPIO_BASE,  DC_PIN,  0);       // DC low  = command
-    GPIOPinWrite(CS_GPIO_BASE,  CS_PIN,  0);       // CS low  = select
+    MAP_GPIOPinWrite(DC_GPIO_BASE,  DC_PIN,  0);       // DC low  = command
+    MAP_GPIOPinWrite(CS_GPIO_BASE,  CS_PIN,  0);       // CS low  = select
     spi_send(cmd);
-    GPIOPinWrite(CS_GPIO_BASE,  CS_PIN,  CS_PIN);  // CS high = deselect
+    MAP_GPIOPinWrite(CS_GPIO_BASE,  CS_PIN,  CS_PIN);  // CS high = deselect
 }
 
 //*****************************************************************************
 
 void writeData(uint8_t data) {
-    GPIOPinWrite(DC_GPIO_BASE,  DC_PIN,  DC_PIN);  // DC high = data
-    GPIOPinWrite(CS_GPIO_BASE,  CS_PIN,  0);       // CS low
+    MAP_GPIOPinWrite(DC_GPIO_BASE,  DC_PIN,  DC_PIN);  // DC high = data
+    MAP_GPIOPinWrite(CS_GPIO_BASE,  CS_PIN,  0);       // CS low
     spi_send(data);
-    GPIOPinWrite(CS_GPIO_BASE,  CS_PIN,  CS_PIN);  // CS high
+    MAP_GPIOPinWrite(CS_GPIO_BASE,  CS_PIN,  CS_PIN);  // CS high
 }
 
 //*****************************************************************************
@@ -80,46 +83,44 @@ void Adafruit_Init() {
     PRCMPeripheralClkEnable(PRCM_GPIOA1, PRCM_RUN_MODE_CLK);
     PRCMPeripheralClkEnable(PRCM_GPIOA2, PRCM_RUN_MODE_CLK);
 
-    GPIODirModeSet(DC_GPIO_BASE,   DC_PIN,   GPIO_DIR_MODE_OUT);
-    GPIODirModeSet(CS_GPIO_BASE,   CS_PIN,   GPIO_DIR_MODE_OUT);
-    GPIODirModeSet(RST_GPIO_BASE,  RST_PIN,  GPIO_DIR_MODE_OUT);
+    GPIODirModeSet(DC_GPIO_BASE,  DC_PIN,  GPIO_DIR_MODE_OUT);
+    GPIODirModeSet(CS_GPIO_BASE,  CS_PIN,  GPIO_DIR_MODE_OUT);
+    GPIODirModeSet(RST_GPIO_BASE, RST_PIN, GPIO_DIR_MODE_OUT);
+
+    GPIOPinWrite(CS_GPIO_BASE,  CS_PIN,  CS_PIN);
+    GPIOPinWrite(DC_GPIO_BASE,  DC_PIN,  DC_PIN);
+    GPIOPinWrite(RST_GPIO_BASE, RST_PIN, RST_PIN);
+
     GPIODirModeSet(SCK_GPIO_BASE,  SCK_PIN,  GPIO_DIR_MODE_OUT);
     GPIODirModeSet(MOSI_GPIO_BASE, MOSI_PIN, GPIO_DIR_MODE_OUT);
-
-    GPIOPinWrite(CS_GPIO_BASE,   CS_PIN,   CS_PIN);
-    GPIOPinWrite(DC_GPIO_BASE,   DC_PIN,   DC_PIN);
-    GPIOPinWrite(RST_GPIO_BASE,  RST_PIN,  RST_PIN);
     GPIOPinWrite(SCK_GPIO_BASE,  SCK_PIN,  0);
     GPIOPinWrite(MOSI_GPIO_BASE, MOSI_PIN, 0);
 
-    // Hardware reset
     GPIOPinWrite(RST_GPIO_BASE, RST_PIN, 0);
     UtilsDelay(3200000);
     GPIOPinWrite(RST_GPIO_BASE, RST_PIN, RST_PIN);
     UtilsDelay(3200000);
 
-    writeCommand(0xFD); writeData(0x12); // Unlock driver
-    writeCommand(0xFD); writeData(0xB1); // Unlock commands
+    writeCommand(0xAE); // display off
 
-    writeCommand(0xAE);                  // Display off
-
-    writeCommand(0xB3); writeData(0xF1); // Front clock divider
-    writeCommand(0xCA); writeData(0x7F); // Mux ratio = 128
-    writeCommand(0xA2); writeData(0x00); // Display offset = 0
-    writeCommand(0xA1); writeData(0x00); // Start line = 0  (was 32 — bug)
-    writeCommand(0xA0); writeData(0x74); // Remap
-
-    writeCommand(0xAB); writeData(0x01); // Function select: internal VDD
-
-    writeCommand(0xB1); writeData(0x32); // Phase length
-    writeCommand(0xB4); writeData(0xA0); writeData(0xB5); writeData(0x55); // Set VSL
-    writeCommand(0xC1); writeData(0xC8); writeData(0x80); writeData(0xC8); // Contrast
-    writeCommand(0xC7); writeData(0x0F); // Master contrast
-    writeCommand(0xB6); writeData(0x01); // Second precharge period
+    writeCommand(0xA0); writeData(0x74); // remap
+    writeCommand(0xA1); writeData(32); // start line
+    writeCommand(0xA2); writeData(0x00); // offset
+    writeCommand(0xB1); writeData(0x32); // phase length
+    writeCommand(0xB3); writeData(0xF1); // clock
+    writeCommand(0xB5); writeData(0x00); // GPIO
+    writeCommand(0xB6); writeData(0x0F); // precharge 2
+    writeCommand(0xC1); // contrast
+    writeData(0xC8); writeData(0x80); writeData(0xC8);
+    writeCommand(0xC7); writeData(0x0F); // master contrast
     writeCommand(0xBE); writeData(0x05); // VCOMH
-    writeCommand(0xA6);                  // Normal display mode
 
-    writeCommand(0xAF);                  // Display on
+    FillScreen(0x0000);
+    writeCommand(0xAF); // display ON
+}
+
+void forceAllPixelsOn(void) {
+    writeCommand(0xA5);  // All pixels ON — no RAM, no init needed
 }
 
 /***********************************/
@@ -154,45 +155,52 @@ void fillScreen(unsigned int fillcolor) {
   fillRect(0, 0, SSD1351WIDTH, SSD1351HEIGHT, fillcolor);
 }
 
+
+void FillScreen(uint16_t color) {
+    int x, y;
+
+    SetAddrWindow(0, 0, 127, 127);
+
+    for (y = 0; y < 128; y++) {
+        for (x = 0; x < 128; x++) {
+            writeData(color >> 8);   // high byte
+            writeData(color & 0xFF); // low byte
+        }
+    }
+}
+
 /**************************************************************************/
 /*!
     @brief  Draws a filled rectangle using HW acceleration
 */
 /**************************************************************************/
+static void writeDataRaw(uint8_t data){
+    MAP_GPIOPinWrite(DC_GPIO_BASE, DC_PIN, DC_PIN);
+    spi_send(data);
+}
+
 void fillRect(unsigned int x, unsigned int y, unsigned int w, unsigned int h, unsigned int fillcolor)
 {
   unsigned int i;
 
-  // Bounds check
-  if ((x >= SSD1351WIDTH) || (y >= SSD1351HEIGHT))
-    return;
+  if ((x >= SSD1351WIDTH) || (y >= SSD1351HEIGHT)) return;
+  if (y+h > SSD1351HEIGHT) h = SSD1351HEIGHT - y - 1;
+  if (x+w > SSD1351WIDTH) w = SSD1351WIDTH - x - 1;
 
-  // Y bounds check
-  if (y+h > SSD1351HEIGHT)
-  {
-    h = SSD1351HEIGHT - y - 1;
-  }
-
-  // X bounds check
-  if (x+w > SSD1351WIDTH)
-  {
-    w = SSD1351WIDTH - x - 1;
-  }
-
-  // set location
   writeCommand(SSD1351_CMD_SETCOLUMN);
   writeData(x);
   writeData(x+w-1);
   writeCommand(SSD1351_CMD_SETROW);
   writeData(y);
   writeData(y+h-1);
-  // fill!
   writeCommand(SSD1351_CMD_WRITERAM);
 
+  MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, 0);
   for (i=0; i < w*h; i++) {
-    writeData(fillcolor >> 8);
-    writeData(fillcolor);
+    writeDataRaw(fillcolor >> 8);
+    writeDataRaw(fillcolor);
   }
+  MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, CS_PIN);
 }
 
 void drawPixel(int x, int y, unsigned int color)
@@ -229,134 +237,45 @@ void SetAddrWindow(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1)
     writeCommand(0x5C); // Write RAM
 }
 
-void FillScreen(uint16_t color) {
-    int x, y;
+void fillScreenRaw(uint16_t color) {
+    int i;
+    uint8_t hi = color >> 8;
+    uint8_t lo = color & 0xFF;
 
-    SetAddrWindow(0, 0, 127, 127);
+    // Set column 0-127
+    MAP_GPIOPinWrite(DC_GPIO_BASE, DC_PIN, 0);     // DC low = command
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, 0);
+    spi_send(0x15);
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, CS_PIN);
+    MAP_GPIOPinWrite(DC_GPIO_BASE, DC_PIN, DC_PIN); // DC high = data
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, 0);
+    spi_send(0);    // start col
+    spi_send(127);  // end col
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, CS_PIN);
 
-    for (y = 0; y < 128; y++) {
-        for (x = 0; x < 128; x++) {
-            writeData(color >> 8);   // high byte
-            writeData(color & 0xFF); // low byte
-        }
+    // Set row 0-127
+    MAP_GPIOPinWrite(DC_GPIO_BASE, DC_PIN, 0);
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, 0);
+    spi_send(0x75);
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, CS_PIN);
+    MAP_GPIOPinWrite(DC_GPIO_BASE, DC_PIN, DC_PIN);
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, 0);
+    spi_send(0);    // start row
+    spi_send(127);  // end row
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, CS_PIN);
+
+    // Write RAM command
+    MAP_GPIOPinWrite(DC_GPIO_BASE, DC_PIN, 0);
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, 0);
+    spi_send(0x5C);
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, CS_PIN);
+
+    // Pixel data — CS stays low for entire burst
+    MAP_GPIOPinWrite(DC_GPIO_BASE, DC_PIN, DC_PIN);
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, 0);
+    for (i = 0; i < 128 * 128; i++) {
+        spi_send(hi);
+        spi_send(lo);
     }
+    MAP_GPIOPinWrite(CS_GPIO_BASE, CS_PIN, CS_PIN);
 }
-
-
-void VerticalBands(){
-    SetAddrWindow(0, 0, 127, 127);
-
-    int y, x;
-    unsigned int color;
-
-    for (y = 0; y < 128; y++) {
-        for (x = 0; x < 128; x++) {
-            if (x % 16 == 0){
-
-                int band = x / 16;
-
-                switch(band) {
-                    case 0: color = 0xF000; break;
-                    case 1: color = 0xFAA0; break;
-                    case 2: color = 0x0AA0; break;
-                    case 3: color = 0x0AAF; break;
-                    case 4: color = 0x000F; break;
-                    case 5: color = 0xF00F; break;
-                    case 6: color = 0xFFFF; break;
-                    case 7: color = 0xABCD; break;
-                }
-
-                writeData(color >> 8);
-                writeData(color);
-            }
-            else{
-                writeData(0x0000 >> 8);
-                writeData(0x0000);
-            }
-        }
-    }
-}
-
-void HorizontalBands(){
-    SetAddrWindow(0, 0, 127, 127);
-
-    int y, x;
-    unsigned int color;
-
-    for (y = 0; y < 128; y++) {
-        for (x = 0; x < 128; x++) {
-            if (y % 16 == 0){
-
-                int band = y / 16;
-
-                switch(band) {
-                    case 0: color = 0xF000; break;
-                    case 1: color = 0xFAA0; break;
-                    case 2: color = 0x0AA0; break;
-                    case 3: color = 0x0AAF; break;
-                    case 4: color = 0x000F; break;
-                    case 5: color = 0xF00F; break;
-                    case 6: color = 0xFFFF; break;
-                    case 7: color = 0xABCD; break;
-                }
-
-                writeData(color >> 8);
-                writeData(color);
-            }
-            else{
-                writeData(0x0000 >> 8);
-                writeData(0x0000);
-            }
-        }
-    }
-}
-
-void drawBall(unsigned int x, unsigned int y, unsigned int w, unsigned int h, unsigned int fillcolor)
-{
-  unsigned int i, j;
-
-  if ((x >= SSD1351WIDTH) || (y >= SSD1351HEIGHT))
-    return;
-
-  if (y + h > SSD1351HEIGHT)
-    h = SSD1351HEIGHT - y;
-
-  if (x + w > SSD1351WIDTH)
-    w = SSD1351WIDTH - x;
-
-  // Center and radius
-  int cx = w / 2;
-  int cy = h / 2;
-  int r = (w < h ? w : h) / 2;
-  int r2 = r * r;
-
-  writeCommand(SSD1351_CMD_SETCOLUMN);
-  writeData(x);
-  writeData(x + w - 1);
-
-  writeCommand(SSD1351_CMD_SETROW);
-  writeData(y);
-  writeData(y + h - 1);
-
-  writeCommand(SSD1351_CMD_WRITERAM);
-
-  for (j = 0; j < h; j++) {
-    for (i = 0; i < w; i++) {
-
-      int dx = i - cx;
-      int dy = j - cy;
-
-      if ((dx * dx + dy * dy) <= r2) {
-        writeData(fillcolor >> 8);
-        writeData(fillcolor);
-      } else {
-        // background (black)
-        writeData(0x00);
-        writeData(0x00);
-      }
-    }
-  }
-}
-
-
-

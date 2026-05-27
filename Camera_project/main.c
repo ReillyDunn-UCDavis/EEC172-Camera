@@ -54,15 +54,20 @@
 //*****************************************************************************
 #define APPLICATION_NAME      "BallGame"
 #define APPLICATION_VERSION   "SQ24"
-#define SERVER_NAME           "abktwrys0k548-ats.iot.us-east-2.amazonaws.com"
-#define GOOGLE_DST_PORT       8443
 
-#define POSTHEADER "POST /things/Reilly_CC3200Board/shadow HTTP/1.1\r\n"
-#define HOSTHEADER "Host: abktwrys0k548-ats.iot.us-east-2.amazonaws.com\r\n"
-#define CHEADER    "Connection: Keep-Alive\r\n"
+//myivxtwrdk.execute-api.us-west-1.amazonaws.com/prod
+
+#define SERVER_NAME           "myivxtwrdk.execute-api.us-west-1.amazonaws.com"
+#define GOOGLE_DST_PORT       443
+#define POSTHEADER "POST /prod/sendimage HTTP/1.1\r\n"
+#define HOSTHEADER "Host: myivxtwrdk.execute-api.us-west-1.amazonaws.com\r\n"
+
+#define CHEADER    "Connection: close\r\n"
 #define CTHEADER   "Content-Type: application/json; charset=utf-8\r\n"
 #define CLHEADER1  "Content-Length: "
 #define CLHEADER2  "\r\n\r\n"
+//#define DEST_EMAIL "rtdunn@ucdavis.edu"
+#define DEST_EMAIL "reillythomasdunn@gmail.com"
 
 #define ARDUCHIP_FIFO        0x04
 #define ARDUCHIP_TRIG        0x41
@@ -122,13 +127,6 @@
 // At ~40 ms per iteration, 25 iterations ≈ 1 second.
 //*****************************************************************************
 #define POST_COOLDOWN_TICKS  25
-
-//*****************************************************************************
-// Game constants
-//*****************************************************************************
-#define BALL_RADIUS   7
-#define SCREEN_MAX_X  120
-#define SCREEN_MAX_Y  120
 
 //*****************************************************************************
 //                 GLOBAL VARIABLES
@@ -391,6 +389,35 @@ static void display_camera_frame()
     UART_PRINT("Frame displayed\n\r");
 }
 
+static int capture_jpeg(unsigned char *buf, size_t bufsize, size_t *outlen)
+{
+    unsigned long length;
+    flush_fifo();
+    start_capture();
+
+    while (!capture_done());
+
+    length = read_fifo_length();
+    UART_PRINT("JPEG FIFO length: %lu\n\r", length);
+    if (length == 0 || length > bufsize) {
+        UART_PRINT("capture_jpeg: bad length, aborting\n\r");
+        return -1;
+    }
+
+    cam_select();
+    spi_transfer(BURST_FIFO_READ);
+
+    unsigned long i;
+    for (i = 0; i < length; i++)
+        buf[i] = spi_transfer(0x00);
+
+    cam_deselect();
+    *outlen = (size_t)length;
+
+    UART_PRINT("capture_jpeg: read %u bytes\n\r", (unsigned)*outlen);
+    return 0;
+}
+
 static int wrSensorReg8_8(unsigned char regID,
                            unsigned char regDat)
 {
@@ -406,6 +433,60 @@ struct sensor_reg {
     unsigned char reg;
     unsigned char val;
 };
+
+static const struct sensor_reg ov2640_jpeg_qqvga[] =
+{
+     {0xff, 0x01},
+     {0x12, 0x00},
+     {0x11, 0x01},
+     {0xff, 0x00},
+     {0xe0, 0x04},
+     {0xda, 0x18},
+     {0xd7, 0x03},
+     {0xc0, 0x64},
+     {0xc1, 0x4b},
+     {0x8c, 0x00},
+     {0x86, 0x3d},
+     {0x50, 0x00},
+     {0x51, 0xc8},
+     {0x52, 0x96},
+     {0x53, 0x00},
+     {0x54, 0x00},
+     {0x55, 0x00},
+     {0x57, 0x00},
+     {0x5a, 0x50},
+     {0x5b, 0x3c},
+     {0x5c, 0x00},
+     {0x44, 0x08},
+     {0xe0, 0x00},
+     {0x00, 0x00},
+ };
+
+static void ov2640_init_jpeg(void)
+{
+    int i = 0;
+
+    UART_PRINT("Initializing OV2640...\n\r");
+
+    wrSensorReg8_8(0xff, 0x01);
+    wrSensorReg8_8(0x12, 0x80);
+    MAP_UtilsDelay(8000000);
+
+    while (!(ov2640_jpeg_qqvga[i].reg == 0x00 &&
+             ov2640_jpeg_qqvga[i].val == 0x00))
+    {
+        wrSensorReg8_8(
+                ov2640_jpeg_qqvga[i].reg,
+                ov2640_jpeg_qqvga[i].val
+        );
+
+        MAP_UtilsDelay(10000);
+
+        i++;
+    }
+
+    UART_PRINT("OV2640 init as jpeg done\n\r");
+}
 
 static const struct sensor_reg ov2640_rgb565_regs[] =
 {
@@ -467,17 +548,113 @@ static void ov2640_init_rgb565()
         i++;
     }
 
-    UART_PRINT("OV2640 init done\n\r");
+    UART_PRINT("OV2640 init as rgb565 done\n\r");
 }
+
+#define SEND_ALL(buf, len)                           \
+do {                                                 \
+    const char *_ptr = (const char *)(buf);          \
+    int _rem = (int)(len);                           \
+    while (_rem > 0) {                               \
+        int _sent = sl_Send(sock, _ptr, _rem, 0);   \
+        if (_sent < 0) { sl_Close(sock); return _sent; } \
+        _ptr += _sent; _rem -= _sent;               \
+    }                                                \
+} while (0)
+
+
+static int base64_encode(const unsigned char *in, size_t inlen,
+                          char *out, size_t outsize)
+{
+    static const char tbl[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    size_t required = ((inlen + 2) / 3) * 4 + 1;
+    if (outsize < required)
+    {
+        UART_PRINT("base64_encode: output buffer too small (%u < %u)\n\r",
+                   (unsigned)outsize, (unsigned)required);
+        return -1;
+    }
+
+    size_t i, o = 0;
+    for (i = 0; i < inlen; i += 3)
+    {
+        unsigned int b  = (unsigned int)in[i] << 16;
+        if (i + 1 < inlen) b |= (unsigned int)in[i+1] << 8;
+        if (i + 2 < inlen) b |= (unsigned int)in[i+2];
+
+        out[o++] = tbl[(b >> 18) & 0x3F];
+        out[o++] = tbl[(b >> 12) & 0x3F];
+        out[o++] = (i + 1 < inlen) ? tbl[(b >>  6) & 0x3F] : '=';
+        out[o++] = (i + 2 < inlen) ? tbl[(b      ) & 0x3F] : '=';
+    }
+    out[o] = '\0';
+    return (int)o;
+}
+
+
+static int send_image_via_aws(const char *b64, size_t b64len)
+{
+    static const char json_prefix[] = "{\"image\":\"";
+    static const char json_suffix[] = "\",\"to\":\"" DEST_EMAIL "\"}";
+    char recvBuf[1460];
+
+    size_t body_len = strlen(json_prefix) + b64len + strlen(json_suffix);
+
+    int sock = tls_connect();
+    if (sock < 0) return sock;
+
+    // assembles entire request into one 512-byte buffer
+    char headers[512];
+    char *p = headers;
+    strcpy(p, POSTHEADER);  p += strlen(POSTHEADER);
+    strcpy(p, HOSTHEADER);  p += strlen(HOSTHEADER);
+    strcpy(p, CHEADER);     p += strlen(CHEADER);
+    strcpy(p, CTHEADER);    p += strlen(CTHEADER);
+    strcpy(p, CLHEADER1);   p += strlen(CLHEADER1);
+    char lenStr[16];
+    snprintf(lenStr, sizeof(lenStr), "%u", (unsigned)body_len);
+    strcpy(p, lenStr);      p += strlen(lenStr);
+    strcpy(p, CLHEADER2);
+
+    UART_PRINT("Sending headers...\n\r");
+    SEND_ALL(headers,     strlen(headers));
+    UART_PRINT("Sending json_prefix...\n\r");
+    SEND_ALL(json_prefix, strlen(json_prefix));
+    UART_PRINT("Sending b64 (%u bytes)...\n\r", (unsigned)b64len);
+    SEND_ALL(b64,         b64len);
+    UART_PRINT("Sending json_suffix...\n\r");
+    SEND_ALL(json_suffix, strlen(json_suffix));
+    UART_PRINT("All sends complete\n\r");
+
+    int n = sl_Recv(sock, recvBuf, sizeof(recvBuf) - 1, 0);
+    if (n > 0) {
+        recvBuf[n] = '\0';
+        UART_PRINT("HTTP response: %.100s\n\r", recvBuf);
+    }
+    sl_Close(sock);
+
+
+    return 0;
+}
+
+#undef SEND_ALL
 
 //*****************************************************************************
 //
 //! main
 //
 //*****************************************************************************
+
+static unsigned char jpeg_buf[20480];
+static char          b64_buf[28672];
+
 void main(void)
 {
     long lRetVal;
+    size_t jpeg_len = 0;
+    int    b64_len  = 0;
 
     //-------------------------------------------------------------------------
     // Hardware init
@@ -489,23 +666,43 @@ void main(void)
     cam_deselect();
     I2C_IF_Open(I2C_MASTER_MODE_FST);
 
-    ov2640_init_rgb565();
-
-    unsigned char da_val;
-    wrSensorReg8_8(0xff, 0x00);  // make sure we're in DSP bank
-    // read back 0xDA
-    unsigned char reg = 0xda;
-    I2C_IF_Write(0x30, &reg, 1, 0);
-    I2C_IF_Read(0x30, &da_val, 1);
-    UART_PRINT("0xDA = 0x%02X\n\r", da_val);
-
-    arducam_write_reg(ARDUCHIP_MODE, CAM2LCD_MODE);
-    unsigned char mode = arducam_read_reg(ARDUCHIP_MODE);
-
     Adafruit_Init();
 
+    g_app_config.host = SERVER_NAME;
+    g_app_config.port = GOOGLE_DST_PORT;
+
+    lRetVal = connectToAccessPoint();
+    if (lRetVal < 0) { UART_PRINT("AP connect failed\n\r"); LOOP_FOREVER(); }
+
+    lRetVal = set_time();
+    if (lRetVal < 0) { UART_PRINT("set_time failed\n\r"); LOOP_FOREVER(); }
+
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Shriya, please make the IR remote trigger this block of code :)
+    // Preferably make it able to do this without restarting the device
+
+    ov2640_init_jpeg();
+    if (capture_jpeg(jpeg_buf, sizeof(jpeg_buf), &jpeg_len) < 0){
+        UART_PRINT("Capture failed\n\r");
+        LOOP_FOREVER();
+    } else {
+        UART_PRINT("jpeg_len = %u\n\r", (unsigned)jpeg_len);
+        b64_len = base64_encode(jpeg_buf, jpeg_len, b64_buf, sizeof(b64_buf));
+
+        if (b64_len < 0){
+            UART_PRINT("Base64 failed — skipping email\n\r");
+        } else {
+            UART_PRINT("b64_len = %d\n\r", b64_len);
+            send_image_via_aws(b64_buf, (size_t)b64_len);
+        }
+    }
+
+    ov2640_init_rgb565();
     display_camera_frame();
 
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    sl_Stop(200);
     while(1);
 
 }

@@ -509,7 +509,7 @@ int tls_connect() {
     unsigned char    ucMethod = SL_SO_SEC_METHOD_TLSV1_2;
     unsigned int uiIP;
 //    unsigned int uiCipher = SL_SEC_MASK_TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA;
-    unsigned int uiCipher = SL_SEC_MASK_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256;
+    unsigned int uiCipher = SL_SEC_MASK_TLS_RSA_WITH_AES_128_CBC_SHA256;
 // SL_SEC_MASK_SSL_RSA_WITH_RC4_128_SHA
 // SL_SEC_MASK_SSL_RSA_WITH_RC4_128_MD5
 // SL_SEC_MASK_TLS_RSA_WITH_AES_256_CBC_SHA
@@ -580,25 +580,25 @@ int tls_connect() {
 
     //configure the socket with Client Certificate - for server verification
     //
-    lRetVal = sl_SetSockOpt(iSockID, SL_SOL_SOCKET, \
-                SL_SO_SECURE_FILES_CERTIFICATE_FILE_NAME, \
-                                    SL_SSL_CLIENT, \
-                           strlen(SL_SSL_CLIENT));
-
-    if(lRetVal < 0) {
-        return printErrConvenience("Device couldn't set socket options \n\r", lRetVal);
-    }
+//    lRetVal = sl_SetSockOpt(iSockID, SL_SOL_SOCKET, \
+//                SL_SO_SECURE_FILES_CERTIFICATE_FILE_NAME, \
+//                                    SL_SSL_CLIENT, \
+//                           strlen(SL_SSL_CLIENT));
+//
+//    if(lRetVal < 0) {
+//        return printErrConvenience("Device couldn't set socket options \n\r", lRetVal);
+//    }
 
     //configure the socket with Private Key - for server verification
     //
-    lRetVal = sl_SetSockOpt(iSockID, SL_SOL_SOCKET, \
-            SL_SO_SECURE_FILES_PRIVATE_KEY_FILE_NAME, \
-            SL_SSL_PRIVATE, \
-                           strlen(SL_SSL_PRIVATE));
-
-    if(lRetVal < 0) {
-        return printErrConvenience("Device couldn't set socket options \n\r", lRetVal);
-    }
+//    lRetVal = sl_SetSockOpt(iSockID, SL_SOL_SOCKET, \
+//            SL_SO_SECURE_FILES_PRIVATE_KEY_FILE_NAME, \
+//            SL_SSL_PRIVATE, \
+//                           strlen(SL_SSL_PRIVATE));
+//
+//    if(lRetVal < 0) {
+//        return printErrConvenience("Device couldn't set socket options \n\r", lRetVal);
+//    }
 
 
     /* connect to the peer device - Google server */
